@@ -1,5 +1,5 @@
 export const VIDEO_MODELS = ["sora-2", "sora-2-pro"] as const;
-export const VIDEO_SECONDS = ["4", "8", "12"] as const;
+export const VIDEO_SECONDS = ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"] as const;
 export const VIDEO_SIZES = {
   "sora-2": ["1280x720", "720x1280"],
   "sora-2-pro": ["1280x720", "720x1280", "1792x1024", "1024x1792", "1920x1080", "1080x1920"],

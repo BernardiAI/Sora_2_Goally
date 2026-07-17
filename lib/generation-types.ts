@@ -1,3 +1,5 @@
+import type { VideoSeconds } from "./video-config";
+
 export type JobStatus =
   | "draft" | "submitting" | "submission_unknown" | "queued" | "in_progress"
   | "completed" | "archiving" | "ready" | "archive_failed" | "stalled"
@@ -6,7 +8,7 @@ export type JobStatus =
 export type GenerationRequest = {
   prompt: string;
   model: "sora-2" | "sora-2-pro";
-  seconds: "4" | "8" | "12";
+  seconds: VideoSeconds;
   size: string;
   reference?: { name: string; type: "image/jpeg" | "image/png" | "image/webp"; path: string };
   /** @deprecated Legacy migration field. New requests always create one job. */

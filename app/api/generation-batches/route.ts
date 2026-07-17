@@ -4,6 +4,7 @@ import { createBatch, db, listJobs, serializeJob } from "../../../lib/generation
 import { submitJob } from "../../../lib/generation-service";
 import { ensureWorker } from "../../../lib/worker";
 import type { ApiError, GenerationRequest } from "../../../lib/generation-types";
+import { VIDEO_SECONDS, type VideoSeconds } from "../../../lib/video-config";
 
 export const runtime = "nodejs";
 const sizes = new Set(["1280x720","720x1280","1792x1024","1024x1792","1920x1080","1080x1920"]);
@@ -12,7 +13,7 @@ const error = (status: number, body: ApiError) => NextResponse.json({ error: bod
 function validate(value: any): GenerationRequest | null {
   const prompt = typeof value?.prompt === "string" ? value.prompt.trim() : "";
   const model = value?.model === "sora-2-pro" ? "sora-2-pro" : value?.model === "sora-2" ? "sora-2" : null;
-  const seconds = ["4","8","12"].includes(String(value?.seconds)) ? String(value.seconds) as "4"|"8"|"12" : null;
+  const seconds = VIDEO_SECONDS.includes(String(value?.seconds) as VideoSeconds) ? String(value.seconds) as VideoSeconds : null;
   const size = sizes.has(value?.size) ? value.size as string : null;
   const variations = [1,2,4].includes(Number(value?.variations)) ? Number(value.variations) as 1|2|4 : null;
   return prompt && model && seconds && size && variations ? { prompt,model,seconds,size,variations } : null;

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { VIDEO_SECONDS } from "../../../lib/video-config";
 
 const OPENAI_VIDEOS_URL = "https://api.openai.com/v1/videos";
 
@@ -13,7 +14,7 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
   if (!prompt) return NextResponse.json({ error: "A prompt is required." }, { status: 400 });
-  const allowedSeconds = new Set(["4", "8", "12"]);
+  const allowedSeconds = new Set<string>(VIDEO_SECONDS);
   const allowedSizes = new Set(["1280x720", "720x1280", "1792x1024", "1024x1792", "1920x1080", "1080x1920"]);
   const seconds = String(body.seconds ?? "4");
   const size = typeof body.size === "string" && allowedSizes.has(body.size) ? body.size : "1280x720";
