@@ -14,17 +14,17 @@ test("generates and downloads a four-second Sora video", async ({ page }) => {
   const prompt =
     "A single blue marble rolls slowly across a plain white tabletop, locked camera, soft daylight.";
   await page.locator("#prompt").fill(prompt);
-  await page.getByRole("button", { name: /^Generate/ }).click();
+  await page.getByRole("button", { name: "Generate clip" }).click();
 
-  const confirmation = page.locator(".confirm-sheet");
-  await expect(confirmation.getByRole("heading", { name: "Confirm this generation" })).toBeVisible();
+  const confirmation = page.getByRole("dialog", { name: "Confirm your clip" });
+  await expect(confirmation).toBeVisible();
   await expect(confirmation.getByText(prompt, { exact: true })).toBeVisible();
   await expect(confirmation.getByText("Sora 2", { exact: true })).toBeVisible();
   await expect(confirmation.getByText("1280 × 720", { exact: true })).toBeVisible();
   await expect(confirmation.getByText("4 seconds", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Confirm & generate" }).click();
-  await expect(page.locator(".generating-state")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("Creating your clip", { exact: true })).toBeVisible({ timeout: 30_000 });
 
   const video = page.locator("video.generated-video");
   await expect(video).toBeVisible({ timeout: 540_000 });
