@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, existsSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import path from "node:path";
-import { assetDir, db, importProviderJob, jobById, jobByProviderId, transition } from "./generation-store";
+import { db, generationDir, importProviderJob, jobById, jobByProviderId, transition } from "./generation-store";
 import { logEvent } from "./telemetry";
 
 const VIDEOS_URL = "https://api.openai.com/v1/videos";
@@ -30,9 +30,11 @@ export async function submitJob(jobId: string) {
   db.prepare("INSERT INTO provider_attempts(id,job_id,operation,started_at,client_request_id) VALUES (?,?,?,?,?)").run(attemptId,jobId,"submit",new Date().toISOString(),job.client_request_id);
   let response: Response;
   try {
+    const form = new FormData();
+    form.set("model", request.model); form.set("prompt", request.prompt); form.set("seconds", request.seconds); form.set("size", request.size);
+    if (request.reference?.path) form.set("input_reference", new Blob([readFileSync(request.reference.path)], { type: request.reference.type }), request.reference.name);
     response = await fetch(VIDEOS_URL, {
-      method: "POST", headers: { ...auth(), "Content-Type": "application/json", "X-Client-Request-Id": job.client_request_id },
-      body: JSON.stringify({ model: request.model, prompt: request.prompt, seconds: request.seconds, size: request.size }),
+      method: "POST", headers: { ...auth(), "X-Client-Request-Id": job.client_request_id }, body: form,
       signal: AbortSignal.timeout(30_000),
     });
   } catch (error) {
@@ -81,7 +83,7 @@ export async function archiveJob(jobId: string) {
   const currentAsset = db.prepare("SELECT * FROM assets WHERE job_id=?").get(jobId) as any;
   if (currentAsset?.verified && currentAsset.path && existsSync(currentAsset.path)) { transition(jobId,"ready","archive"); return; }
   transition(jobId,"archiving","archive");
-  const finalPath = path.join(assetDir, `${job.provider_video_id}.mp4`);
+  const finalPath = path.join(generationDir(jobId), "output.mp4");
   const tempPath = `${finalPath}.${crypto.randomUUID()}.part`;
   const assetId = currentAsset?.id || crypto.randomUUID();
   db.prepare(`INSERT INTO assets(id,job_id,temp_path,attempt_count,created_at,updated_at) VALUES (?,?,?,?,?,?)

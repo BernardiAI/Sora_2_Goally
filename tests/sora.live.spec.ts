@@ -9,7 +9,7 @@ test("generates and downloads a four-second Sora video", async ({ page }) => {
   test.setTimeout(600_000);
 
   await page.goto("/");
-  await expect(page.getByRole("button", { name: "OpenAI connected" })).toBeVisible();
+  await expect(page.getByText("OpenAI connected", { exact: true })).toBeVisible();
 
   const prompt =
     "A single blue marble rolls slowly across a plain white tabletop, locked camera, soft daylight.";

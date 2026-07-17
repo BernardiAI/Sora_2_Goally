@@ -45,10 +45,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({code:"estimate_confirmation_required",estimatedCents,previousEstimateCents:body.confirmedEstimateCents ?? null},{status:409});
   const idempotencyKey = request.headers.get("idempotency-key") || crypto.randomUUID();
   const batchId = crypto.randomUUID();
-  const jobIds = Array.from({length:input.variations},()=>crypto.randomUUID());
+  const jobIds = Array.from({length:input.variations ?? 1},()=>crypto.randomUUID());
   const created = createBatch(input,idempotencyKey,batchId,jobIds,unit);
   if (created.created) await Promise.all(jobIds.map(submitJob));
   const rows = listJobs().filter(job=>job.batch_id===created.batchId).map(serializeJob);
   return NextResponse.json({batchId:created.batchId,estimatedCents,jobs:rows,deduplicated:!created.created},{status:created.created?201:200});
 }
-

@@ -8,7 +8,9 @@ export type GenerationRequest = {
   model: "sora-2" | "sora-2-pro";
   seconds: "4" | "8" | "12";
   size: string;
-  variations: 1 | 2 | 4;
+  reference?: { name: string; type: "image/jpeg" | "image/png" | "image/webp"; path: string };
+  /** @deprecated Legacy migration field. New requests always create one job. */
+  variations?: 1 | 2 | 4;
 };
 
 export type ApiError = {
@@ -20,4 +22,3 @@ export type ApiError = {
   providerRequestId?: string | null;
   clientRequestId?: string | null;
 };
-

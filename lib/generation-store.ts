@@ -1,11 +1,13 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { GenerationRequest, JobStatus } from "./generation-types";
 
 const dataDir = process.env.SORA_DATA_DIR || path.join(process.cwd(), ".data");
-export const assetDir = process.env.SORA_ASSET_DIR || path.join(dataDir, "assets");
-mkdirSync(assetDir, { recursive: true });
+export const generationsDir = process.env.SORA_GENERATIONS_DIR || path.join(process.cwd(), "generated-videos");
+export const assetDir = generationsDir;
+mkdirSync(dataDir, { recursive: true });
+mkdirSync(generationsDir, { recursive: true });
 
 const globalDb = globalThis as typeof globalThis & { __soraDb?: DatabaseSync };
 export const db = globalDb.__soraDb ?? new DatabaseSync(path.join(dataDir, "generations.sqlite"));
@@ -52,13 +54,42 @@ db.exec(`
 const now = () => new Date().toISOString();
 export const json = (value: unknown) => JSON.stringify(value);
 
+export function generationDir(id: string) {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("Invalid generation id.");
+  return path.join(generationsDir, id);
+}
+
+export function writeManifest(id: string) {
+  const row = jobById(id);
+  if (!row) return;
+  const dir = generationDir(id);
+  mkdirSync(dir, { recursive: true });
+  const target = path.join(dir, "request.json");
+  const temp = `${target}.tmp`;
+  writeFileSync(temp, JSON.stringify(serializeJob(row), null, 2), { mode: 0o600 });
+  renameSync(temp, target);
+}
+
+export function createJob(request: GenerationRequest, estimatedCents: number) {
+  const id = crypto.randomUUID();
+  const timestamp = now();
+  mkdirSync(generationDir(id), { recursive: true });
+  db.prepare(`INSERT INTO jobs
+    (id,variation_index,request_json,status,estimated_cents,client_request_id,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?)`).run(id, 0, json(request), "draft", estimatedCents, crypto.randomUUID(), timestamp, timestamp);
+  db.prepare("INSERT INTO status_events(job_id,to_status,source,created_at) VALUES (?,?,?,?)").run(id, "draft", "app", timestamp);
+  db.prepare("INSERT INTO spend_events(job_id,kind,estimated_cents,created_at) VALUES (?,?,?,?)").run(id, "committed_estimate", estimatedCents, timestamp);
+  writeManifest(id);
+  return id;
+}
+
 export function createBatch(request: GenerationRequest, idempotencyKey: string, batchId: string, jobIds: string[], cents: number) {
   const existing = db.prepare("SELECT id FROM batches WHERE idempotency_key=?").get(idempotencyKey) as { id: string } | undefined;
   if (existing) return { batchId: existing.id, created: false };
   const timestamp = now();
   db.exec("BEGIN IMMEDIATE");
   try {
-    db.prepare("INSERT INTO batches VALUES (?, ?, ?, ?, ?, ?)").run(batchId, idempotencyKey, json(request), cents * request.variations, timestamp, timestamp);
+    db.prepare("INSERT INTO batches VALUES (?, ?, ?, ?, ?, ?)").run(batchId, idempotencyKey, json(request), cents * (request.variations ?? 1), timestamp, timestamp);
     const insertJob = db.prepare(`INSERT INTO jobs
       (id,batch_id,variation_index,request_json,status,estimated_cents,client_request_id,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?)`);
@@ -82,6 +113,7 @@ export function transition(jobId: string, status: JobStatus, source: string, fie
   db.prepare(`UPDATE jobs SET ${sets.join(",")} WHERE id=?`).run(status, now(), ...entries.map(([, value]) => value ?? null), jobId);
   if (current.status !== status) db.prepare("INSERT INTO status_events(job_id,from_status,to_status,source,detail_json,created_at) VALUES (?,?,?,?,?,?)")
     .run(jobId, current.status, status, source, json(fields), now());
+  writeManifest(jobId);
 }
 
 export function jobById(id: string) { return db.prepare("SELECT * FROM jobs WHERE id=?").get(id) as any; }
@@ -96,7 +128,8 @@ export function getState(key: string) { return (db.prepare("SELECT value FROM ap
 export function serializeJob(row: any) {
   const request = JSON.parse(row.request_json);
   const asset = assetForJob(row.id);
-  return { ...row, request, request_json: undefined, asset: asset ? { ...asset, temp_path: undefined } : null };
+  if (request.reference) request.reference = { name: request.reference.name, type: request.reference.type, storedFile: path.basename(request.reference.path) };
+  return { ...row, request, request_json: undefined, client_request_id: undefined, asset: asset ? { verified: asset.verified, mime_type: asset.mime_type, byte_count: asset.byte_count, sha256: asset.sha256 } : null };
 }
 
 export function importProviderJob(video: any) {
@@ -104,11 +137,12 @@ export function importProviderJob(video: any) {
   if (existing) return existing.id as string;
   const id = crypto.randomUUID();
   const timestamp = now();
-  const request = { prompt: video.prompt || "Recovered OpenAI generation", model: video.model || "sora-2", seconds: String(video.seconds || "4"), size: video.size || "1280x720", variations: 1 };
+  const request = { prompt: video.prompt || "Recovered OpenAI generation", model: video.model || "sora-2", seconds: String(video.seconds || "4"), size: video.size || "1280x720" };
   const providerStatus = video.status === "completed" ? "completed" : video.status === "failed" ? (video.error?.code === "moderation_blocked" ? "moderation_blocked" : "failed") : video.status === "cancelled" ? "cancelled" : video.status === "in_progress" ? "in_progress" : "queued";
   db.prepare(`INSERT INTO jobs
     (id,variation_index,request_json,status,progress,estimated_cents,provider_video_id,provider_created_at,provider_completed_at,provider_expires_at,error_code,error_message,recovered,last_reconciled_at,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id,0,json(request),providerStatus,video.progress || 0,0,video.id,video.created_at || null,video.completed_at || null,video.expires_at || null,video.error?.code || null,video.error?.message || null,1,timestamp,timestamp,timestamp);
   db.prepare("INSERT INTO status_events(job_id,to_status,source,detail_json,created_at) VALUES (?,?,?,?,?)").run(id,providerStatus,"provider_recovery",json({providerVideoId:video.id}),timestamp);
+  writeManifest(id);
   return id;
 }

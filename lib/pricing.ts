@@ -8,10 +8,9 @@ export function unitEstimateCents(request: Pick<GenerationRequest, "model" | "si
 }
 
 export function batchEstimateCents(request: GenerationRequest) {
-  return unitEstimateCents(request) * request.variations;
+  return unitEstimateCents(request) * (request.variations ?? 1);
 }
 
 export function formatUsd(cents: number) {
   return `$${(cents / 100).toFixed(2)}`;
 }
-

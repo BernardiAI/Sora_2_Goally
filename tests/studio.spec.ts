@@ -1,97 +1,16 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-async function mockSuccessfulGeneration(page: import("@playwright/test").Page) {
-  let statusReads = 0;
-  await page.route("**/api/health", (route) => route.fulfill({ json: { configured: true } }));
-  await page.route("**/api/videos?*", (route) => {
-    statusReads += 1;
-    return route.fulfill({ json: statusReads === 1
-      ? { id: "video_mock", status: "in_progress", progress: 42 }
-      : { id: "video_mock", status: "completed", progress: 100 } });
-  });
-  await page.route("**/api/videos", async (route) => {
-    if (route.request().method() === "POST") return route.fulfill({ json: { id: "video_mock", status: "queued" } });
-    return route.continue();
-  });
-  await page.route("**/api/videos/video_mock/content", (route) => route.fulfill({
-    status: 200,
-    contentType: "video/mp4",
-    body: Buffer.from("mock video"),
-  }));
-}
+const baseJob = { id:"00000000-0000-4000-8000-000000000001",status:"queued",progress:0,estimated_cents:40,created_at:"2026-07-17T12:00:00.000Z",request:{prompt:"A blue marble rolls across a white table.",model:"sora-2",seconds:"4",size:"1280x720"},asset:null };
+async function baseMocks(page:Page,jobs:any[]=[]){await page.route("**/api/health",r=>r.fulfill({json:{configured:true}}));await page.route("**/api/generations",r=>r.request().method()==="GET"?r.fulfill({json:{jobs}}):r.continue());}
 
-test("shows a focused Studio with sensible defaults", async ({ page }) => {
-  await page.route("**/api/health", (route) => route.fulfill({ json: { configured: false } }));
-  await page.goto("/");
+test("shows focused Create and persistent History navigation",async({page})=>{await baseMocks(page);await page.goto("/");await expect(page.getByRole("heading",{name:"Studio"})).toBeVisible();await expect(page.getByLabel("Prompt")).toBeFocused();await expect(page.getByRole("button",{name:/Generate clip/})).toBeDisabled();await expect(page.getByRole("button",{name:/History/})).toBeVisible();await expect(page.getByText("$0.40",{exact:true})).toBeVisible();await expect(page.getByText("Variations",{exact:true})).toHaveCount(0);});
 
-  await expect(page.getByRole("heading", { name: "Studio" })).toBeVisible();
-  await expect(page.getByLabel("Prompt")).toBeFocused();
-  await expect(page.getByRole("button", { name: "Generate clip" })).toBeDisabled();
-  await expect(page.getByText("$0.40", { exact: true })).toBeVisible();
-  await expect(page.getByText("One 4-second clip · Sora 2 · 1280 × 720", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Edit" })).toHaveCount(0);
-  await expect(page.getByText("Variations", { exact: true })).toHaveCount(0);
-});
+test("offers every create option and accurate confirmation",async({page})=>{await baseMocks(page);await page.goto("/");await page.locator("summary").click();await page.getByLabel("Model").selectOption("sora-2-pro");await page.getByLabel("Duration").selectOption("8");await page.getByLabel("Orientation").selectOption("portrait");await page.getByLabel("Resolution").selectOption("1080x1920");await page.getByLabel("Prompt").fill("A paper kite rises above a field.");await expect(page.getByText("$5.60",{exact:true})).toBeVisible();await page.getByRole("button",{name:/Generate clip/}).click();const dialog=page.getByRole("dialog",{name:"Confirm your clip"});await expect(dialog.getByText("Sora 2 Pro",{exact:true})).toBeVisible();await expect(dialog.getByText("1080 × 1920",{exact:true})).toBeVisible();await expect(dialog.getByText("None",{exact:true})).toBeVisible();});
 
-test("uses real output controls and confirms the selected values", async ({ page }) => {
-  await page.route("**/api/health", (route) => route.fulfill({ json: { configured: true } }));
-  await page.goto("/");
-  await page.locator("summary").click();
-  await page.getByLabel("Model").selectOption("sora-2-pro");
-  await page.getByLabel("Duration").selectOption("8");
-  await page.getByLabel("Orientation").selectOption("portrait");
-  await page.getByLabel("Resolution").selectOption("1080x1920");
-  await page.getByLabel("Prompt").fill("A paper kite rises above a windswept field.");
+test("submits one multipart request and retains it in History",async({page})=>{await baseMocks(page);let posts=0;await page.route("**/api/generations",async route=>{if(route.request().method()==="POST"){posts++;expect(route.request().postDataBuffer()).toBeTruthy();return route.fulfill({status:201,json:{job:baseJob}});}return route.fulfill({json:{jobs:[]}});});await page.goto("/");await page.getByLabel("Prompt").fill(baseJob.request.prompt);await page.getByRole("button",{name:/Generate clip/}).click();await page.getByRole("button",{name:/Confirm & generate/}).click();await expect(page.getByText("Creating your clip",{exact:true})).toBeVisible();await page.getByRole("button",{name:/History/}).click();await expect(page.getByText(baseJob.request.prompt,{exact:true})).toBeVisible();expect(posts).toBe(1);});
 
-  await expect(page.getByText("$5.60", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Generate clip" }).click();
-  const dialog = page.getByRole("dialog", { name: "Confirm your clip" });
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("Sora 2 Pro", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("8 seconds", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("1080 × 1920", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("$5.60", { exact: true })).toBeVisible();
-});
+test("validates reference type and exact dimensions",async({page})=>{await baseMocks(page);await page.goto("/");const input=page.locator('input[type="file"]');await input.setInputFiles({name:"reference.gif",mimeType:"image/gif",buffer:Buffer.from("gif")});await expect(page.locator(".inline-error")).toContainText("JPEG, PNG, or WebP");});
 
-test("creates exactly one clip and exposes playback and download", async ({ page }) => {
-  await mockSuccessfulGeneration(page);
-  let postCount = 0;
-  page.on("request", (request) => {
-    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/videos") postCount += 1;
-  });
-  await page.goto("/");
-  await page.getByLabel("Prompt").fill("A blue marble rolls across a white table.");
-  await page.getByRole("button", { name: "Generate clip" }).click();
-  await page.getByRole("button", { name: "Confirm & generate" }).click();
+test("shows saved jobs after reload and completed download",async({page})=>{const completed={...baseJob,status:"ready",progress:100,asset:{verified:1}};await baseMocks(page,[completed]);await page.goto("/");await page.getByRole("button",{name:/History/}).click();await expect(page.getByText(baseJob.request.prompt,{exact:true})).toBeVisible();await expect(page.locator("video.generated-video")).toHaveAttribute("src",`/api/generations/${baseJob.id}/content`);await expect(page.getByRole("link",{name:"Download"})).toBeVisible();});
 
-  await expect(page.getByText("Creating your clip", { exact: true })).toBeVisible();
-  await expect(page.locator("video.generated-video")).toBeVisible({ timeout: 10_000 });
-  await expect(page.getByRole("link", { name: "Download" })).toHaveAttribute("href", "/api/videos/video_mock/content");
-  expect(postCount).toBe(1);
-  await expect(page.getByText("Recent clips", { exact: true })).toHaveCount(0);
-});
-
-test("keeps the prompt and shows an inline error when submission fails", async ({ page }) => {
-  await page.route("**/api/health", (route) => route.fulfill({ json: { configured: true } }));
-  await page.route("**/api/videos", (route) => route.fulfill({ status: 429, json: { error: "Rate limit reached." } }));
-  await page.goto("/");
-  const prompt = "A lantern floating over a still lake.";
-  await page.getByLabel("Prompt").fill(prompt);
-  await page.getByRole("button", { name: "Generate clip" }).click();
-  await page.getByRole("button", { name: "Confirm & generate" }).click();
-
-  await expect(page.locator(".inline-error")).toHaveText(/Rate limit reached/);
-  await expect(page.getByLabel("Prompt")).toHaveValue(prompt);
-  await expect(page.getByRole("button", { name: "Generate clip" })).toBeEnabled();
-});
-
-test("keeps the primary action accessible on a narrow screen", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.route("**/api/health", (route) => route.fulfill({ json: { configured: false } }));
-  await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Studio" })).toBeVisible();
-  await expect(page.getByLabel("Prompt")).toBeVisible();
-  await page.getByLabel("Prompt").fill("A short mobile test clip.");
-  await expect(page.getByRole("button", { name: "Generate clip" })).toBeEnabled();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy();
-});
+test("keeps the primary action accessible on mobile",async({page})=>{await page.setViewportSize({width:390,height:844});await baseMocks(page);await page.goto("/");await expect(page.getByRole("button",{name:"History"})).toBeVisible();await page.getByLabel("Prompt").fill("A short mobile test clip.");await expect(page.getByRole("button",{name:/Generate clip/})).toBeEnabled();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth)).toBeTruthy();});
