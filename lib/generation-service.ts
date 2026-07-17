@@ -1,0 +1,134 @@
+import { createHash } from "node:crypto";
+import { createReadStream, createWriteStream, existsSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import { Readable } from "node:stream";
+import path from "node:path";
+import { assetDir, db, importProviderJob, jobById, jobByProviderId, transition } from "./generation-store";
+import { logEvent } from "./telemetry";
+
+const VIDEOS_URL = "https://api.openai.com/v1/videos";
+const auth = () => {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) throw Object.assign(new Error("OPENAI_API_KEY is not configured."), { code: "missing_api_key" });
+  return { Authorization: `Bearer ${key}` };
+};
+const message = (payload: any, fallback: string) => payload?.error?.message || fallback;
+
+function providerStatus(video: any) {
+  if (video.status === "completed") return "completed";
+  if (video.status === "failed") return video.error?.code === "moderation_blocked" ? "moderation_blocked" : "failed";
+  if (video.status === "cancelled") return "cancelled";
+  return video.status === "in_progress" ? "in_progress" : "queued";
+}
+
+export async function submitJob(jobId: string) {
+  const job = jobById(jobId);
+  if (!job || job.status !== "draft") return;
+  const request = JSON.parse(job.request_json);
+  const attemptId = crypto.randomUUID();
+  transition(jobId, "submitting", "worker");
+  db.prepare("INSERT INTO provider_attempts(id,job_id,operation,started_at,client_request_id) VALUES (?,?,?,?,?)").run(attemptId,jobId,"submit",new Date().toISOString(),job.client_request_id);
+  let response: Response;
+  try {
+    response = await fetch(VIDEOS_URL, {
+      method: "POST", headers: { ...auth(), "Content-Type": "application/json", "X-Client-Request-Id": job.client_request_id },
+      body: JSON.stringify({ model: request.model, prompt: request.prompt, seconds: request.seconds, size: request.size }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Submission connection failed.";
+    transition(jobId, "submission_unknown", "worker", { error_code: "submission_unknown", error_message: errorMessage });
+    db.prepare("UPDATE provider_attempts SET finished_at=?,outcome=?,error_code=?,error_message=? WHERE id=?").run(new Date().toISOString(),"unknown","submission_unknown",errorMessage,attemptId);
+    logEvent("error","generation.submission_unknown",{jobId,clientRequestId:job.client_request_id,error:errorMessage});
+    return;
+  }
+  const providerRequestId = response.headers.get("x-request-id");
+  const payload = await response.json().catch(() => null);
+  db.prepare("UPDATE provider_attempts SET finished_at=?,http_status=?,provider_request_id=?,outcome=?,error_code=?,error_message=? WHERE id=?")
+    .run(new Date().toISOString(),response.status,providerRequestId,response.ok?"accepted":"rejected",payload?.error?.code || null,response.ok?null:message(payload,"Video request failed."),attemptId);
+  if (!response.ok) {
+    const code = payload?.error?.code || `provider_http_${response.status}`;
+    transition(jobId, code === "moderation_blocked" ? "moderation_blocked" : "failed", "provider", { provider_request_id: providerRequestId, provider_http_status: response.status, error_code: code, error_message: message(payload,"Video request failed.") });
+    return;
+  }
+  if (!payload?.id) {
+    transition(jobId,"submission_unknown","provider",{provider_request_id:providerRequestId,provider_http_status:response.status,error_code:"invalid_provider_response",error_message:"OpenAI accepted the request but returned no video id."});
+    return;
+  }
+  transition(jobId, providerStatus(payload), "provider", { provider_video_id: payload.id, provider_request_id: providerRequestId, provider_http_status: response.status, progress: payload.progress || 0, provider_created_at: payload.created_at || null, provider_expires_at: payload.expires_at || null });
+  logEvent("info","generation.accepted",{jobId,providerVideoId:payload.id,providerRequestId});
+}
+
+export async function reconcileJob(jobId: string) {
+  const job = jobById(jobId);
+  if (!job?.provider_video_id) return;
+  const response = await fetch(`${VIDEOS_URL}/${encodeURIComponent(job.provider_video_id)}`, { headers: auth(), cache: "no-store", signal: AbortSignal.timeout(20_000) });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    if (response.status === 404 && job.provider_expires_at && job.provider_expires_at * 1000 < Date.now()) transition(jobId,"expired","provider",{error_code:"provider_asset_expired",error_message:"The provider no longer has this video."});
+    else logEvent("warn","generation.reconcile_failed",{jobId,httpStatus:response.status,error:message(payload,"Unable to retrieve video.")});
+    return;
+  }
+  const status = providerStatus(payload);
+  const localStatus = status === "completed" && job.status === "ready" ? "ready" : status;
+  transition(jobId,localStatus,"provider",{progress:payload.progress || 0,provider_created_at:payload.created_at || null,provider_completed_at:payload.completed_at || null,provider_expires_at:payload.expires_at || null,error_code:payload.error?.code || null,error_message:payload.error?.message || null,last_reconciled_at:new Date().toISOString()});
+  if (status === "completed") await archiveJob(jobId);
+}
+
+export async function archiveJob(jobId: string) {
+  const job = jobById(jobId);
+  if (!job?.provider_video_id) return;
+  const currentAsset = db.prepare("SELECT * FROM assets WHERE job_id=?").get(jobId) as any;
+  if (currentAsset?.verified && currentAsset.path && existsSync(currentAsset.path)) { transition(jobId,"ready","archive"); return; }
+  transition(jobId,"archiving","archive");
+  const finalPath = path.join(assetDir, `${job.provider_video_id}.mp4`);
+  const tempPath = `${finalPath}.${crypto.randomUUID()}.part`;
+  const assetId = currentAsset?.id || crypto.randomUUID();
+  db.prepare(`INSERT INTO assets(id,job_id,temp_path,attempt_count,created_at,updated_at) VALUES (?,?,?,?,?,?)
+    ON CONFLICT(job_id) DO UPDATE SET temp_path=excluded.temp_path,attempt_count=assets.attempt_count+1,updated_at=excluded.updated_at`).run(assetId,jobId,tempPath,1,new Date().toISOString(),new Date().toISOString());
+  try {
+    const response = await fetch(`${VIDEOS_URL}/${encodeURIComponent(job.provider_video_id)}/content`, { headers: auth(), cache:"no-store", signal:AbortSignal.timeout(120_000) });
+    if (!response.ok || !response.body) throw new Error(`Asset download failed with HTTP ${response.status}.`);
+    const mime = response.headers.get("content-type") || "";
+    if (!mime.startsWith("video/")) throw new Error(`Unexpected asset content type: ${mime || "missing"}.`);
+    await pipeline(Readable.fromWeb(response.body as any), createWriteStream(tempPath,{flags:"wx",mode:0o600}));
+    const bytes = statSync(tempPath).size;
+    if (!bytes) throw new Error("Downloaded asset was empty.");
+    const hash = createHash("sha256");
+    for await (const chunk of createReadStream(tempPath)) hash.update(chunk);
+    const sha256 = hash.digest("hex");
+    renameSync(tempPath,finalPath);
+    db.prepare("UPDATE assets SET path=?,temp_path=NULL,mime_type=?,byte_count=?,sha256=?,verified=1,last_error=NULL,updated_at=? WHERE job_id=?").run(finalPath,mime,bytes,sha256,new Date().toISOString(),jobId);
+    transition(jobId,"ready","archive");
+    logEvent("info","asset.archived",{jobId,path:finalPath,bytes,sha256});
+  } catch (error) {
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+    const errorMessage = error instanceof Error ? error.message : "Asset archival failed.";
+    db.prepare("UPDATE assets SET temp_path=NULL,last_error=?,updated_at=? WHERE job_id=?").run(errorMessage,new Date().toISOString(),jobId);
+    transition(jobId,"archive_failed","archive",{error_code:"archive_failed",error_message:errorMessage});
+    logEvent("error","asset.archive_failed",{jobId,error:errorMessage});
+  }
+}
+
+export async function reconcileAll() {
+  let after: string | undefined;
+  do {
+    const url = new URL(VIDEOS_URL); url.searchParams.set("limit","100"); url.searchParams.set("order","asc"); if (after) url.searchParams.set("after",after);
+    const response = await fetch(url,{headers:auth(),cache:"no-store",signal:AbortSignal.timeout(30_000)});
+    const payload = await response.json().catch(()=>null);
+    if (!response.ok) throw new Error(message(payload,`Provider reconciliation failed with HTTP ${response.status}.`));
+    const videos = payload?.data || [];
+    for (const video of videos) {
+      const jobId = jobByProviderId(video.id)?.id || importProviderJob(video);
+      const status = providerStatus(video);
+      const existing = jobByProviderId(video.id);
+      const localStatus = status === "completed" && existing?.status === "ready" ? "ready" : status;
+      transition(jobId,localStatus,"provider_recovery",{progress:video.progress || 0,provider_created_at:video.created_at || null,provider_completed_at:video.completed_at || null,provider_expires_at:video.expires_at || null,error_code:video.error?.code || null,error_message:video.error?.message || null,last_reconciled_at:new Date().toISOString()});
+      if (status === "completed") await archiveJob(jobId);
+    }
+    after = payload?.has_more && videos.length ? videos[videos.length-1].id : undefined;
+  } while (after);
+  const timestamp = new Date().toISOString();
+  db.prepare("INSERT INTO app_state VALUES ('last_reconciliation',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(timestamp,timestamp);
+  logEvent("info","reconciliation.completed",{timestamp});
+}
