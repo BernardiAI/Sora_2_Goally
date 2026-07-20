@@ -1,12 +1,17 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
+import { promisify } from "node:util";
+import ffmpegPath from "ffmpeg-static";
 import path from "node:path";
 import { db, generationDir, importProviderJob, jobById, jobByProviderId, transition } from "./generation-store";
 import { logEvent } from "./telemetry";
+import { providerVideoSeconds } from "./video-config";
 
 const VIDEOS_URL = "https://api.openai.com/v1/videos";
+const runFile = promisify(execFile);
 const auth = () => {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw Object.assign(new Error("OPENAI_API_KEY is not configured."), { code: "missing_api_key" });
@@ -25,6 +30,7 @@ export async function submitJob(jobId: string) {
   const job = jobById(jobId);
   if (!job || job.status !== "draft") return;
   const request = JSON.parse(job.request_json);
+  const renderSeconds = providerVideoSeconds(request.seconds);
   const attemptId = crypto.randomUUID();
   transition(jobId, "submitting", "worker");
   db.prepare("INSERT INTO provider_attempts(id,job_id,operation,started_at,client_request_id) VALUES (?,?,?,?,?)").run(attemptId,jobId,"submit",new Date().toISOString(),job.client_request_id);
@@ -38,13 +44,13 @@ export async function submitJob(jobId: string) {
       body = JSON.stringify({
         model: request.model,
         prompt: request.prompt,
-        seconds: request.seconds,
+        seconds: renderSeconds,
         size: request.size,
         input_reference: { image_url: `data:${request.reference.type};base64,${image}` },
       });
     } else {
       const form = new FormData();
-      form.set("model", request.model); form.set("prompt", request.prompt); form.set("seconds", request.seconds); form.set("size", request.size);
+      form.set("model", request.model); form.set("prompt", request.prompt); form.set("seconds", renderSeconds); form.set("size", request.size);
       body = form;
     }
     response = await fetch(VIDEOS_URL, {
@@ -99,6 +105,7 @@ export async function archiveJob(jobId: string) {
   transition(jobId,"archiving","archive");
   const finalPath = path.join(generationDir(jobId), "output.mp4");
   const tempPath = `${finalPath}.${crypto.randomUUID()}.part`;
+  const trimmedPath = `${finalPath}.${crypto.randomUUID()}.trim.mp4`;
   const assetId = currentAsset?.id || crypto.randomUUID();
   db.prepare(`INSERT INTO assets(id,job_id,temp_path,attempt_count,created_at,updated_at) VALUES (?,?,?,?,?,?)
     ON CONFLICT(job_id) DO UPDATE SET temp_path=excluded.temp_path,attempt_count=assets.attempt_count+1,updated_at=excluded.updated_at`).run(assetId,jobId,tempPath,1,new Date().toISOString(),new Date().toISOString());
@@ -108,17 +115,28 @@ export async function archiveJob(jobId: string) {
     const mime = response.headers.get("content-type") || "";
     if (!mime.startsWith("video/")) throw new Error(`Unexpected asset content type: ${mime || "missing"}.`);
     await pipeline(Readable.fromWeb(response.body as any), createWriteStream(tempPath,{flags:"wx",mode:0o600}));
-    const bytes = statSync(tempPath).size;
-    if (!bytes) throw new Error("Downloaded asset was empty.");
+    if (!statSync(tempPath).size) throw new Error("Downloaded asset was empty.");
+    const request = JSON.parse(job.request_json);
+    const renderSeconds = providerVideoSeconds(request.seconds);
+    let archivedPath = tempPath;
+    if (request.seconds !== renderSeconds) {
+      if (!ffmpegPath) throw new Error("The bundled video trimmer is unavailable.");
+      await runFile(ffmpegPath, ["-y","-i",tempPath,"-t",request.seconds,"-c:v","libx264","-preset","fast","-crf","18","-c:a","aac","-movflags","+faststart",trimmedPath], { timeout: 120_000 });
+      unlinkSync(tempPath);
+      archivedPath = trimmedPath;
+    }
+    const bytes = statSync(archivedPath).size;
+    if (!bytes) throw new Error("Processed asset was empty.");
     const hash = createHash("sha256");
-    for await (const chunk of createReadStream(tempPath)) hash.update(chunk);
+    for await (const chunk of createReadStream(archivedPath)) hash.update(chunk);
     const sha256 = hash.digest("hex");
-    renameSync(tempPath,finalPath);
+    renameSync(archivedPath,finalPath);
     db.prepare("UPDATE assets SET path=?,temp_path=NULL,mime_type=?,byte_count=?,sha256=?,verified=1,last_error=NULL,updated_at=? WHERE job_id=?").run(finalPath,mime,bytes,sha256,new Date().toISOString(),jobId);
     transition(jobId,"ready","archive");
     logEvent("info","asset.archived",{jobId,path:finalPath,bytes,sha256});
   } catch (error) {
     if (existsSync(tempPath)) unlinkSync(tempPath);
+    if (existsSync(trimmedPath)) unlinkSync(trimmedPath);
     const errorMessage = error instanceof Error ? error.message : "Asset archival failed.";
     db.prepare("UPDATE assets SET temp_path=NULL,last_error=?,updated_at=? WHERE job_id=?").run(errorMessage,new Date().toISOString(),jobId);
     transition(jobId,"archive_failed","archive",{error_code:"archive_failed",error_message:errorMessage});

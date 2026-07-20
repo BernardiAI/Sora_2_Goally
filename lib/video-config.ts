@@ -7,10 +7,16 @@ export const VIDEO_SIZES = {
 
 export type VideoModel = (typeof VIDEO_MODELS)[number];
 export type VideoSeconds = (typeof VIDEO_SECONDS)[number];
+export type ProviderVideoSeconds = "4" | "8" | "12";
+
+export function providerVideoSeconds(seconds: VideoSeconds): ProviderVideoSeconds {
+  const requested = Number(seconds);
+  return requested <= 4 ? "4" : requested <= 8 ? "8" : "12";
+}
 
 export function estimateVideoCents(model: VideoModel, size: string, seconds: VideoSeconds) {
   const rate = model === "sora-2" ? 10 : /1920|1080/.test(size) ? 70 : /1792|1024/.test(size) ? 50 : 30;
-  return rate * Number(seconds);
+  return rate * Number(providerVideoSeconds(seconds));
 }
 
 export function isValidVideoRequest(value: any) {

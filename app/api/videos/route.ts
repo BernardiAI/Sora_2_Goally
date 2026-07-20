@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { VIDEO_SECONDS } from "../../../lib/video-config";
+import { VIDEO_SECONDS, providerVideoSeconds, type VideoSeconds } from "../../../lib/video-config";
 
 const OPENAI_VIDEOS_URL = "https://api.openai.com/v1/videos";
 
@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
   const response = await fetch(OPENAI_VIDEOS_URL, {
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: body.model === "sora-2-pro" ? "sora-2-pro" : "sora-2", prompt, seconds: allowedSeconds.has(seconds) ? seconds : "4", size }),
+    body: JSON.stringify({ model: body.model === "sora-2-pro" ? "sora-2-pro" : "sora-2", prompt, seconds: providerVideoSeconds((allowedSeconds.has(seconds) ? seconds : "4") as VideoSeconds), size }),
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) return NextResponse.json({ error: payload?.error?.message ?? "OpenAI video request failed." }, { status: response.status });
