@@ -30,11 +30,25 @@ export async function submitJob(jobId: string) {
   db.prepare("INSERT INTO provider_attempts(id,job_id,operation,started_at,client_request_id) VALUES (?,?,?,?,?)").run(attemptId,jobId,"submit",new Date().toISOString(),job.client_request_id);
   let response: Response;
   try {
-    const form = new FormData();
-    form.set("model", request.model); form.set("prompt", request.prompt); form.set("seconds", request.seconds); form.set("size", request.size);
-    if (request.reference?.path) form.set("input_reference", new Blob([readFileSync(request.reference.path)], { type: request.reference.type }), request.reference.name);
+    const headers: Record<string,string> = { ...auth(), "X-Client-Request-Id": job.client_request_id };
+    let body: FormData | string;
+    if (request.reference?.path) {
+      const image = readFileSync(request.reference.path).toString("base64");
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify({
+        model: request.model,
+        prompt: request.prompt,
+        seconds: request.seconds,
+        size: request.size,
+        input_reference: { image_url: `data:${request.reference.type};base64,${image}` },
+      });
+    } else {
+      const form = new FormData();
+      form.set("model", request.model); form.set("prompt", request.prompt); form.set("seconds", request.seconds); form.set("size", request.size);
+      body = form;
+    }
     response = await fetch(VIDEOS_URL, {
-      method: "POST", headers: { ...auth(), "X-Client-Request-Id": job.client_request_id }, body: form,
+      method: "POST", headers, body,
       signal: AbortSignal.timeout(30_000),
     });
   } catch (error) {
