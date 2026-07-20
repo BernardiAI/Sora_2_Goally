@@ -4,13 +4,13 @@ import { createReadStream, createWriteStream, existsSync, readFileSync, renameSy
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { promisify } from "node:util";
-import ffmpegPath from "ffmpeg-static";
 import path from "node:path";
 import { db, generationDir, importProviderJob, jobById, jobByProviderId, transition } from "./generation-store";
 import { logEvent } from "./telemetry";
 import { providerVideoSeconds } from "./video-config";
 
 const VIDEOS_URL = "https://api.openai.com/v1/videos";
+const ffmpegPath = process.env.FFMPEG_PATH || path.join(process.cwd(), "node_modules", "ffmpeg-static", "ffmpeg");
 const runFile = promisify(execFile);
 const auth = () => {
   const key = process.env.OPENAI_API_KEY;
@@ -120,7 +120,7 @@ export async function archiveJob(jobId: string) {
     const renderSeconds = providerVideoSeconds(request.seconds);
     let archivedPath = tempPath;
     if (request.seconds !== renderSeconds) {
-      if (!ffmpegPath) throw new Error("The bundled video trimmer is unavailable.");
+      if (!existsSync(ffmpegPath)) throw new Error(`The bundled video trimmer was not found at ${ffmpegPath}.`);
       await runFile(ffmpegPath, ["-y","-i",tempPath,"-t",request.seconds,"-c:v","libx264","-preset","fast","-crf","18","-c:a","aac","-movflags","+faststart",trimmedPath], { timeout: 120_000 });
       unlinkSync(tempPath);
       archivedPath = trimmedPath;
