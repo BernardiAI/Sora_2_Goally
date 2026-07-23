@@ -14,9 +14,12 @@ export function providerVideoSeconds(seconds: VideoSeconds): ProviderVideoSecond
   return requested <= 4 ? "4" : requested <= 8 ? "8" : "12";
 }
 
+export function videoRateCents(model: VideoModel, size: string) {
+  return model === "sora-2" ? 10 : /1920|1080/.test(size) ? 70 : /1792|1024/.test(size) ? 50 : 30;
+}
+
 export function estimateVideoCents(model: VideoModel, size: string, seconds: VideoSeconds) {
-  const rate = model === "sora-2" ? 10 : /1920|1080/.test(size) ? 70 : /1792|1024/.test(size) ? 50 : 30;
-  return rate * Number(providerVideoSeconds(seconds));
+  return videoRateCents(model, size) * Number(providerVideoSeconds(seconds));
 }
 
 export function isValidVideoRequest(value: any) {
