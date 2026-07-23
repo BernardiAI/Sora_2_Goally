@@ -4,19 +4,19 @@ import { createBatch, db, listJobs, serializeJob } from "../../../lib/generation
 import { submitJob } from "../../../lib/generation-service";
 import { ensureWorker } from "../../../lib/worker";
 import type { ApiError, GenerationRequest } from "../../../lib/generation-types";
-import { VIDEO_SECONDS, type VideoSeconds } from "../../../lib/video-config";
+import { isValidVideoRequest, VIDEO_SECONDS, type VideoSeconds } from "../../../lib/video-config";
 
 export const runtime = "nodejs";
-const sizes = new Set(["1280x720","720x1280","1792x1024","1024x1792","1920x1080","1080x1920"]);
 const error = (status: number, body: ApiError) => NextResponse.json({ error: body }, { status });
 
 function validate(value: any): GenerationRequest | null {
   const prompt = typeof value?.prompt === "string" ? value.prompt.trim() : "";
-  const model = value?.model === "sora-2-pro" ? "sora-2-pro" : value?.model === "sora-2" ? "sora-2" : null;
+  const model: GenerationRequest["model"] | null = value?.model === "sora-2-pro" ? "sora-2-pro" : value?.model === "sora-2" ? "sora-2" : null;
   const seconds = VIDEO_SECONDS.includes(String(value?.seconds) as VideoSeconds) ? String(value.seconds) as VideoSeconds : null;
-  const size = sizes.has(value?.size) ? value.size as string : null;
+  const size = typeof value?.size === "string" ? value.size : null;
   const variations = [1,2,4].includes(Number(value?.variations)) ? Number(value.variations) as 1|2|4 : null;
-  return prompt && model && seconds && size && variations ? { prompt,model,seconds,size,variations } : null;
+  const candidate = prompt && model && seconds && size ? { prompt,model,seconds,size } : null;
+  return candidate && variations && isValidVideoRequest(candidate) ? { ...candidate,variations } : null;
 }
 
 export async function GET() {

@@ -9,7 +9,6 @@ import { db, generationDir, importProviderJob, jobById, jobByProviderId, transit
 import { logEvent } from "./telemetry";
 import { providerVideoSeconds } from "./video-config";
 import { prepareCharacterReference } from "./video-reference";
-import { createReferencePhotoGuidance } from "./reference-photo-guidance";
 
 const VIDEOS_URL = "https://api.openai.com/v1/videos";
 const ffmpegPath = process.env.FFMPEG_PATH || path.join(process.cwd(), "node_modules", "ffmpeg-static", "ffmpeg");
@@ -37,17 +36,6 @@ export async function submitJob(jobId: string) {
   transition(jobId, "submitting", "worker");
   db.prepare("INSERT INTO provider_attempts(id,job_id,operation,started_at,client_request_id) VALUES (?,?,?,?,?)").run(attemptId,jobId,"submit",new Date().toISOString(),job.client_request_id);
   let character: Awaited<ReturnType<typeof prepareCharacterReference>> | null = null;
-  if (request.referencePhotos?.length) {
-    try {
-      request.referencePhotoGuidance = await createReferencePhotoGuidance(request.referencePhotos, request.prompt);
-      db.prepare("UPDATE jobs SET request_json=? WHERE id=?").run(JSON.stringify(request), jobId);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Reference photos could not be analyzed.";
-      transition(jobId, "failed", "reference_photo_analyzer", { error_code: "reference_photo_analysis_failed", error_message: errorMessage });
-      db.prepare("UPDATE provider_attempts SET finished_at=?,outcome=?,error_code=?,error_message=? WHERE id=?").run(new Date().toISOString(),"rejected","reference_photo_analysis_failed",errorMessage,attemptId);
-      return;
-    }
-  }
   if (request.videoReference?.path) {
     try {
       character = await prepareCharacterReference(request.videoReference.path, request.prompt, generationDir(jobId));
@@ -71,7 +59,7 @@ export async function submitJob(jobId: string) {
       const characterGuidance = storedCharacters.map((item: any) => `${item.name}: ${item.description}`).join("\n");
       const payload: any = {
         model: request.model,
-        prompt: `${request.prompt}${request.referencePhotoGuidance ? `\n\n${request.referencePhotoGuidance}` : ""}${character ? "\n\nKeep Reference subject visually consistent with the uploaded character clip." : ""}${characterGuidance ? `\n\nKeep these named characters visually consistent:\n${characterGuidance}` : ""}`,
+        prompt: `${request.prompt}${character ? "\n\nKeep Reference subject visually consistent with the uploaded character clip." : ""}${characterGuidance ? `\n\nKeep these named characters visually consistent:\n${characterGuidance}` : ""}`,
         seconds: renderSeconds,
         size: request.size,
       };

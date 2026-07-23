@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { VIDEO_SECONDS, providerVideoSeconds, type VideoSeconds } from "../../../lib/video-config";
+import { isValidVideoRequest, providerVideoSeconds, type VideoModel, type VideoSeconds } from "../../../lib/video-config";
 
 const OPENAI_VIDEOS_URL = "https://api.openai.com/v1/videos";
 
@@ -14,14 +14,15 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
   if (!prompt) return NextResponse.json({ error: "A prompt is required." }, { status: 400 });
-  const allowedSeconds = new Set<string>(VIDEO_SECONDS);
-  const allowedSizes = new Set(["1280x720", "720x1280", "1792x1024", "1024x1792", "1920x1080", "1080x1920"]);
   const seconds = String(body.seconds ?? "4");
-  const size = typeof body.size === "string" && allowedSizes.has(body.size) ? body.size : "1280x720";
+  const model: VideoModel = body.model === "sora-2-pro" ? "sora-2-pro" : "sora-2";
+  const size = typeof body.size === "string" ? body.size : "1280x720";
+  const candidate = { prompt,model,seconds,size };
+  if (!isValidVideoRequest(candidate)) return NextResponse.json({ error: "Model, duration, and resolution must be a supported combination." }, { status: 400 });
   const response = await fetch(OPENAI_VIDEOS_URL, {
     method: "POST",
     headers: { ...headers, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: body.model === "sora-2-pro" ? "sora-2-pro" : "sora-2", prompt, seconds: providerVideoSeconds((allowedSeconds.has(seconds) ? seconds : "4") as VideoSeconds), size }),
+    body: JSON.stringify({ model, prompt, seconds: providerVideoSeconds(seconds as VideoSeconds), size }),
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) return NextResponse.json({ error: payload?.error?.message ?? "OpenAI video request failed." }, { status: response.status });
