@@ -20,6 +20,7 @@ export async function POST(request: NextRequest) {
   const contentType = request.headers.get("content-type") || "";
   let value: any;
   let reference: File | null = null;
+  let referencePhotos: File[] = [];
   let videoReference: File | null = null;
   if (contentType.includes("multipart/form-data")) {
     const form = await request.formData();
@@ -27,6 +28,7 @@ export async function POST(request: NextRequest) {
     value.character_ids = form.get("character_ids");
     const candidate = form.get("input_reference");
     reference = candidate instanceof File && candidate.size ? candidate : null;
+    referencePhotos = form.getAll("reference_photos").filter((candidate): candidate is File => candidate instanceof File && candidate.size > 0);
     const videoCandidate = form.get("video_reference");
     videoReference = videoCandidate instanceof File && videoCandidate.size ? videoCandidate : null;
   } else value = await request.json().catch(() => null);
@@ -34,6 +36,10 @@ export async function POST(request: NextRequest) {
   if (!isValidVideoRequest(value)) return NextResponse.json({ error: "Prompt, model, duration, and a valid model resolution are required." }, { status: 400 });
   if (reference && (!imageTypes.has(reference.type) || reference.size > MAX_REFERENCE_BYTES))
     return NextResponse.json({ error: "Reference images must be JPEG, PNG, or WebP and no larger than 20 MB." }, { status: 400 });
+  if (referencePhotos.length > 5) return NextResponse.json({ error: "Sora 2 Pro visual guidance accepts up to 5 reference photos." }, { status: 400 });
+  if (referencePhotos.length && value.model !== "sora-2-pro") return NextResponse.json({ error: "Additional reference photos are available only with Sora 2 Pro." }, { status: 400 });
+  if (referencePhotos.some((photo) => !imageTypes.has(photo.type) || photo.size > MAX_REFERENCE_BYTES))
+    return NextResponse.json({ error: "Reference photos must be JPEG, PNG, or WebP and no larger than 20 MB each." }, { status: 400 });
   if (videoReference && (videoReference.type !== "video/mp4" || videoReference.size > MAX_VIDEO_REFERENCE_BYTES))
     return NextResponse.json({ error: "Reference videos must be MP4 and no larger than 100 MB." }, { status: 400 });
 
@@ -53,6 +59,17 @@ export async function POST(request: NextRequest) {
     const target = path.join(generationDir(id), `reference${imageTypes.get(reference.type)}`);
     await BunlessWrite(target, reference);
     requestValue.reference = { name: reference.name, type: reference.type, path: target };
+    const { db } = await import("../../../lib/generation-store");
+    db.prepare("UPDATE jobs SET request_json=? WHERE id=?").run(JSON.stringify(requestValue), id);
+    writeManifest(id);
+  }
+  if (referencePhotos.length) {
+    requestValue.referencePhotos = [];
+    for (const [index, photo] of referencePhotos.entries()) {
+      const target = path.join(generationDir(id), `reference-photo-${index + 1}${imageTypes.get(photo.type)}`);
+      await BunlessWrite(target, photo);
+      requestValue.referencePhotos.push({ name: photo.name, type: photo.type, path: target });
+    }
     const { db } = await import("../../../lib/generation-store");
     db.prepare("UPDATE jobs SET request_json=? WHERE id=?").run(JSON.stringify(requestValue), id);
     writeManifest(id);
