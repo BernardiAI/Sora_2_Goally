@@ -1,12 +1,12 @@
 import path from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { NextRequest, NextResponse } from "next/server";
-import { createCharacterFromImage } from "../../../lib/character-service";
+import { createCharacterFromVideo } from "../../../lib/character-service";
 import { db, listCharacters } from "../../../lib/generation-store";
+import { inspectVideoMetadata } from "../../../lib/video-reference";
 
 export const runtime = "nodejs";
-const imageTypes = new Map([["image/jpeg", ".jpg"], ["image/png", ".png"], ["image/webp", ".webp"]]);
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
 const characterRoot = path.join(process.env.SORA_DATA_DIR || path.join(process.cwd(), ".data"), "characters");
 
 const serialize = (row: any) => ({ id: row.id, characterId: row.provider_character_id, name: row.name, description: row.description, createdAt: row.created_at });
@@ -20,19 +20,21 @@ export async function POST(request: NextRequest) {
   const form = await request.formData();
   const name = String(form.get("name") || "").trim();
   const description = String(form.get("description") || "").trim();
-  const candidate = form.get("image");
-  const image = candidate instanceof File && candidate.size ? candidate : null;
+  const candidate = form.get("video");
+  const video = candidate instanceof File && candidate.size ? candidate : null;
   if (!name || name.length > 80) return NextResponse.json({ error: "Enter a character name of 80 characters or fewer." }, { status: 400 });
   if (!description || description.length > 2000) return NextResponse.json({ error: "Enter a character description of 2,000 characters or fewer." }, { status: 400 });
-  if (!image || !imageTypes.has(image.type) || image.size > MAX_IMAGE_BYTES) return NextResponse.json({ error: "Choose a JPEG, PNG, or WebP image no larger than 20 MB." }, { status: 400 });
+  if (!video || video.type !== "video/mp4" || video.size > MAX_VIDEO_BYTES) return NextResponse.json({ error: "Choose a 2–4 second MP4 reference clip no larger than 100 MB." }, { status: 400 });
   const id = crypto.randomUUID();
   const directory = path.join(characterRoot, id);
   await mkdir(directory, { recursive: true });
-  const imagePath = path.join(directory, `reference${imageTypes.get(image.type)}`);
+  const imagePath = path.join(directory, "reference.mp4");
   const videoPath = path.join(directory, "character-source.mp4");
-  await writeFile(imagePath, Buffer.from(await image.arrayBuffer()), { mode: 0o600 });
+  await writeFile(imagePath, Buffer.from(await video.arrayBuffer()), { mode: 0o600 });
   try {
-    const characterId = await createCharacterFromImage(imagePath, videoPath, name);
+    const { duration, width, height } = await inspectVideoMetadata(imagePath);
+    if (duration < 2 || duration > 4.05) return NextResponse.json({ error: "Character reference clips must be between 2 and 4 seconds long." }, { status: 400 });
+    const characterId = await createCharacterFromVideo(imagePath, videoPath, name, height > width);
     const timestamp = new Date().toISOString();
     db.prepare("INSERT INTO characters(id,provider_character_id,name,description,image_path,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
       .run(id, characterId, name, description, imagePath, timestamp, timestamp);

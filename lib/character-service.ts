@@ -13,11 +13,12 @@ function auth() {
   return { Authorization: `Bearer ${key}` };
 }
 
-export async function createCharacterFromImage(imagePath: string, outputPath: string, name: string) {
+export async function createCharacterFromVideo(videoPath: string, outputPath: string, name: string, portrait: boolean) {
+  const targetSize = portrait ? "720:1280" : "1280:720";
   await runFile(ffmpegPath, [
-    "-y", "-loop", "1", "-i", imagePath, "-t", "2",
-    "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p",
-    "-r", "24", "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-an", "-movflags", "+faststart", outputPath,
+    "-y", "-i", videoPath, "-t", "4",
+    "-map", "0:v:0", "-an", "-vf", `scale=${targetSize}:force_original_aspect_ratio=increase,crop=${targetSize},format=yuv420p`,
+    "-r", "24", "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-movflags", "+faststart", outputPath,
   ], { timeout: 120_000 });
   const form = new FormData();
   form.set("name", name);

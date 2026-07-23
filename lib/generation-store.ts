@@ -139,7 +139,8 @@ export function serializeJob(row: any) {
   const request = JSON.parse(row.request_json);
   const asset = assetForJob(row.id);
   if (request.reference) request.reference = { name: request.reference.name, type: request.reference.type, storedFile: path.basename(request.reference.path) };
-  if (request.videoReference) request.videoReference = { name: request.videoReference.name, type: request.videoReference.type, storedFile: path.basename(request.videoReference.path), selectedStart: request.videoReference.selectedStart, selectedDuration: request.videoReference.selectedDuration };
+  if (request.videoReference) request.videoReference = { name: request.videoReference.name, type: request.videoReference.type, storedFile: path.basename(request.videoReference.path), characterName: request.videoReference.characterName, selectedStart: request.videoReference.selectedStart, selectedDuration: request.videoReference.selectedDuration };
+  if (request.videoReferences) request.videoReferences = request.videoReferences.map((item: any) => ({ name:item.name,type:item.type,storedFile:path.basename(item.path),characterName:item.characterName,description:item.description,selectedStart:item.selectedStart,selectedDuration:item.selectedDuration }));
   return { ...row, request, request_json: undefined, client_request_id: undefined, asset: asset ? { verified: asset.verified, mime_type: asset.mime_type, byte_count: asset.byte_count, sha256: asset.sha256 } : null };
 }
 

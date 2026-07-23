@@ -20,19 +20,27 @@ function apiMessage(payload: any, fallback: string) {
   return payload?.error?.message || fallback;
 }
 
-export async function inspectVideoDuration(videoPath: string) {
+export async function inspectVideoMetadata(videoPath: string) {
   if (!existsSync(ffmpegPath)) throw new Error("The bundled video processor is unavailable.");
+  let output = "";
   try {
     const result = await runFile(ffmpegPath, ["-hide_banner", "-i", videoPath, "-f", "null", "-"], { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 });
-    const match = /Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(`${result.stderr}\n${result.stdout}`);
-    if (match) return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+    output = `${result.stderr}\n${result.stdout}`;
   } catch (cause: any) {
-    const output = `${cause?.stderr || ""}\n${cause?.stdout || ""}`;
-    const match = /Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(output);
-    if (match) return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
-    throw new Error("The MP4 clip could not be read.");
+    output = `${cause?.stderr || ""}\n${cause?.stdout || ""}`;
   }
-  throw new Error("The MP4 clip duration could not be determined.");
+  const durationMatch = /Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(output);
+  const sizeMatch = /Video:[^\n]*?\b(\d{2,5})x(\d{2,5})\b/.exec(output);
+  if (!durationMatch || !sizeMatch) throw new Error("The MP4 clip metadata could not be determined.");
+  return {
+    duration: Number(durationMatch[1]) * 3600 + Number(durationMatch[2]) * 60 + Number(durationMatch[3]),
+    width: Number(sizeMatch[1]),
+    height: Number(sizeMatch[2]),
+  };
+}
+
+export async function inspectVideoDuration(videoPath: string) {
+  return (await inspectVideoMetadata(videoPath)).duration;
 }
 
 function responseText(payload: any) {
@@ -75,15 +83,18 @@ async function chooseRelevantStart(videoPath: string, prompt: string, duration: 
 }
 
 export async function prepareCharacterReference(videoPath: string, prompt: string, workDir: string, characterName = "Reference subject"): Promise<PreparedCharacter> {
-  const duration = await inspectVideoDuration(videoPath);
+  const { duration, width, height } = await inspectVideoMetadata(videoPath);
   if (duration < 2 || duration > 8.05) throw new Error("Reference videos must be between 2 and 8 seconds long.");
+  mkdirSync(workDir, { recursive: true });
   const selectedDuration = Math.min(4, duration);
   const selectedStart = await chooseRelevantStart(videoPath, prompt, duration, workDir);
   const trimmedPath = path.join(workDir, "reference-character.mp4");
+  const targetSize = height > width ? "720:1280" : "1280:720";
   await runFile(ffmpegPath, [
     "-y", "-ss", String(selectedStart), "-i", videoPath, "-t", String(selectedDuration),
-    "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
-    "-crf", "18", "-c:a", "aac", "-movflags", "+faststart", trimmedPath,
+    "-map", "0:v:0", "-an", "-vf", `scale=${targetSize}:force_original_aspect_ratio=increase,crop=${targetSize},format=yuv420p`,
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast",
+    "-crf", "18", "-movflags", "+faststart", trimmedPath,
   ], { timeout: 120_000 });
   const form = new FormData();
   form.set("name", characterName);

@@ -1,5 +1,5 @@
 export const VIDEO_MODELS = ["sora-2", "sora-2-pro"] as const;
-export const VIDEO_SECONDS = ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"] as const;
+export const VIDEO_SECONDS = ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"] as const;
 export const VIDEO_SIZES = {
   "sora-2": ["1280x720", "720x1280"],
   "sora-2-pro": ["1280x720", "720x1280", "1792x1024", "1024x1792", "1920x1080", "1080x1920"],
@@ -7,11 +7,11 @@ export const VIDEO_SIZES = {
 
 export type VideoModel = (typeof VIDEO_MODELS)[number];
 export type VideoSeconds = (typeof VIDEO_SECONDS)[number];
-export type ProviderVideoSeconds = "4" | "8" | "12";
+export type ProviderVideoSeconds = "4" | "8" | "12" | "16" | "20";
 
 export function providerVideoSeconds(seconds: VideoSeconds): ProviderVideoSeconds {
   const requested = Number(seconds);
-  return requested <= 4 ? "4" : requested <= 8 ? "8" : "12";
+  return requested <= 4 ? "4" : requested <= 8 ? "8" : requested <= 12 ? "12" : requested <= 16 ? "16" : "20";
 }
 
 export function videoRateCents(model: VideoModel, size: string) {
