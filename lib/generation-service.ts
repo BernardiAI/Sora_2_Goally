@@ -8,6 +8,7 @@ import path from "node:path";
 import { db, generationDir, importProviderJob, jobById, jobByProviderId, transition } from "./generation-store";
 import { logEvent } from "./telemetry";
 import { providerVideoSeconds } from "./video-config";
+import { prepareCharacterReference } from "./video-reference";
 
 const VIDEOS_URL = "https://api.openai.com/v1/videos";
 const ffmpegPath = process.env.FFMPEG_PATH || path.join(process.cwd(), "node_modules", "ffmpeg-static", "ffmpeg");
@@ -34,20 +35,41 @@ export async function submitJob(jobId: string) {
   const attemptId = crypto.randomUUID();
   transition(jobId, "submitting", "worker");
   db.prepare("INSERT INTO provider_attempts(id,job_id,operation,started_at,client_request_id) VALUES (?,?,?,?,?)").run(attemptId,jobId,"submit",new Date().toISOString(),job.client_request_id);
+  let character: Awaited<ReturnType<typeof prepareCharacterReference>> | null = null;
+  if (request.videoReference?.path) {
+    try {
+      character = await prepareCharacterReference(request.videoReference.path, request.prompt, generationDir(jobId));
+      request.videoReference = { ...request.videoReference, selectedStart: character.selectedStart, selectedDuration: character.selectedDuration, characterId: character.id };
+      db.prepare("UPDATE jobs SET request_json=? WHERE id=?").run(JSON.stringify(request), jobId);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "The reference video could not be prepared.";
+      transition(jobId, "failed", "reference_processor", { error_code: "reference_video_failed", error_message: errorMessage });
+      db.prepare("UPDATE provider_attempts SET finished_at=?,outcome=?,error_code=?,error_message=? WHERE id=?").run(new Date().toISOString(),"rejected","reference_video_failed",errorMessage,attemptId);
+      logEvent("error","reference_video.failed",{jobId,error:errorMessage});
+      return;
+    }
+  }
   let response: Response;
   try {
     const headers: Record<string,string> = { ...auth(), "X-Client-Request-Id": job.client_request_id };
     let body: FormData | string;
-    if (request.reference?.path) {
-      const image = readFileSync(request.reference.path).toString("base64");
+    if (request.reference?.path || character || request.characters?.length) {
       headers["Content-Type"] = "application/json";
-      body = JSON.stringify({
+      const storedCharacters = request.characters || [];
+      const characterGuidance = storedCharacters.map((item: any) => `${item.name}: ${item.description}`).join("\n");
+      const payload: any = {
         model: request.model,
-        prompt: request.prompt,
+        prompt: `${request.prompt}${character ? "\n\nKeep Reference subject visually consistent with the uploaded character clip." : ""}${characterGuidance ? `\n\nKeep these named characters visually consistent:\n${characterGuidance}` : ""}`,
         seconds: renderSeconds,
         size: request.size,
-        input_reference: { image_url: `data:${request.reference.type};base64,${image}` },
-      });
+      };
+      if (request.reference?.path) {
+        const image = readFileSync(request.reference.path).toString("base64");
+        payload.input_reference = { image_url: `data:${request.reference.type};base64,${image}` };
+      }
+      const characterPayload = [...storedCharacters.map((item: any) => ({ id: item.id })), ...(character ? [{ id: character.id }] : [])];
+      if (characterPayload.length) payload.characters = characterPayload;
+      body = JSON.stringify(payload);
     } else {
       const form = new FormData();
       form.set("model", request.model); form.set("prompt", request.prompt); form.set("seconds", renderSeconds); form.set("size", request.size);
@@ -78,7 +100,7 @@ export async function submitJob(jobId: string) {
     return;
   }
   transition(jobId, providerStatus(payload), "provider", { provider_video_id: payload.id, provider_request_id: providerRequestId, provider_http_status: response.status, progress: payload.progress || 0, provider_created_at: payload.created_at || null, provider_expires_at: payload.expires_at || null });
-  logEvent("info","generation.accepted",{jobId,providerVideoId:payload.id,providerRequestId});
+  logEvent("info","generation.accepted",{jobId,providerVideoId:payload.id,providerRequestId,requestedModel:request.model,providerModel:payload.model??null,requestedSize:request.size,providerSize:payload.size??null,requestedSeconds:request.seconds,providerSeconds:payload.seconds??renderSeconds});
 }
 
 export async function reconcileJob(jobId: string) {
@@ -121,7 +143,10 @@ export async function archiveJob(jobId: string) {
     let archivedPath = tempPath;
     if (request.seconds !== renderSeconds) {
       if (!existsSync(ffmpegPath)) throw new Error(`The bundled video trimmer was not found at ${ffmpegPath}.`);
-      await runFile(ffmpegPath, ["-y","-i",tempPath,"-t",request.seconds,"-c:v","libx264","-preset","fast","-crf","18","-c:a","aac","-movflags","+faststart",trimmedPath], { timeout: 120_000 });
+      // The provider only renders 4, 8, or 12 seconds. Keep custom whole-second
+      // durations without recompressing Sora's output, which preserves its exact
+      // video and audio quality.
+      await runFile(ffmpegPath, ["-y","-i",tempPath,"-t",request.seconds,"-map","0","-c","copy","-movflags","+faststart",trimmedPath], { timeout: 120_000 });
       unlinkSync(tempPath);
       archivedPath = trimmedPath;
     }

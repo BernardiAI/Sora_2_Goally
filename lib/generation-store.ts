@@ -49,6 +49,10 @@ db.exec(`
     created_at TEXT NOT NULL, FOREIGN KEY(job_id) REFERENCES jobs(id)
   );
   CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS characters (
+    id TEXT PRIMARY KEY, provider_character_id TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
+    description TEXT NOT NULL, image_path TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  );
 `);
 
 const now = () => new Date().toISOString();
@@ -124,11 +128,18 @@ export function eventsForJob(id: string) { return db.prepare("SELECT * FROM stat
 export function assetForJob(id: string) { return db.prepare("SELECT * FROM assets WHERE job_id=?").get(id) as any; }
 export function setState(key: string, value: string) { db.prepare("INSERT INTO app_state VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(key,value,now()); }
 export function getState(key: string) { return (db.prepare("SELECT value FROM app_state WHERE key=?").get(key) as any)?.value as string | undefined; }
+export function listCharacters() { return db.prepare("SELECT id,provider_character_id,name,description,created_at,updated_at FROM characters ORDER BY created_at").all() as any[]; }
+export function charactersByProviderIds(ids: string[]) {
+  if (!ids.length) return [];
+  const placeholders = ids.map(() => "?").join(",");
+  return db.prepare(`SELECT id,provider_character_id,name,description FROM characters WHERE provider_character_id IN (${placeholders})`).all(...ids) as any[];
+}
 
 export function serializeJob(row: any) {
   const request = JSON.parse(row.request_json);
   const asset = assetForJob(row.id);
   if (request.reference) request.reference = { name: request.reference.name, type: request.reference.type, storedFile: path.basename(request.reference.path) };
+  if (request.videoReference) request.videoReference = { name: request.videoReference.name, type: request.videoReference.type, storedFile: path.basename(request.videoReference.path), selectedStart: request.videoReference.selectedStart, selectedDuration: request.videoReference.selectedDuration };
   return { ...row, request, request_json: undefined, client_request_id: undefined, asset: asset ? { verified: asset.verified, mime_type: asset.mime_type, byte_count: asset.byte_count, sha256: asset.sha256 } : null };
 }
 

@@ -11,6 +11,8 @@ export type GenerationRequest = {
   seconds: VideoSeconds;
   size: string;
   reference?: { name: string; type: "image/jpeg" | "image/png" | "image/webp"; path: string };
+  videoReference?: { name: string; type: "video/mp4"; path: string; selectedStart?: number; selectedDuration?: number; characterId?: string };
+  characters?: Array<{ id: string; name: string; description: string }>;
   /** @deprecated Legacy migration field. New requests always create one job. */
   variations?: 1 | 2 | 4;
 };
